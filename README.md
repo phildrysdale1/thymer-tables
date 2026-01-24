@@ -2,6 +2,8 @@
 
 Render pipe-separated tables in Thymer code blocks as HTML tables
 
+<img width="650" height="520" alt="image" src="https://github.com/user-attachments/assets/23c8e02a-403f-497d-8244-fbfb7eca47b1" />
+
 ## Installation
 
 1. Copy `plugin.js`
