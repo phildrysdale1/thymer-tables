@@ -1,4 +1,4 @@
-# Thymer Table Plugin
+# Thyme(r)s Tables Plugin
 
 Render pipe-separated tables in Thymer code blocks as HTML tables
 
@@ -11,21 +11,34 @@ Render pipe-separated tables in Thymer code blocks as HTML tables
 
 ## Usage
 
-Create a code block (`Ctrl+P` → "code block") and type:
+Create a table in markdown format:
 
 ```
 Name | Age | City
 Alice | 30 | NYC
 Bob | 25 | LA
+
+or 
+
+| Name | Age | City |
+| Alice | 30 | NYC |
+| Bob | 25 | LA |
 ```
 
 Click outside → table renders. Click table → edit mode.
+
+The plugin will ignore tables in code blocks
 
 ## Syntax
 
 ```
 Header1 | Header2 | Header3
 Value1 | Value2 | Value3
+
+or
+
+| Header1 | Header2 | Header3 |
+| Value1 | Value2 | Value3 |
 ```
 
 Optional separator:
