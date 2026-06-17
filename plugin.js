@@ -1,5 +1,5 @@
 /**
- * Thymer Table Plugin
+ * Thyme(s)r Tables Plugin
  * 
  * Renders pipe-separated tables in Thymer code blocks.
  * 
@@ -14,7 +14,7 @@
  * 5. Click outside → re-renders
  * 
  * @author phild & Niklas (with help from Claude & Gemini
- * @version 1.1.0
+ * @version 1.1.1
  * @license GPL3
  */
 class Plugin extends AppPlugin {
@@ -28,7 +28,8 @@ class Plugin extends AppPlugin {
 
     onUnload() {
         if (this.observer) this.observer.disconnect();
-        if (this.clickHandler) document.removeEventListener('click', this.clickHandler);
+        if (this.clickHandler) document.removeEventListener('click', this.clickHandler, true);
+        if (this.scanTimer) clearTimeout(this.scanTimer);
     }
 
     /**
@@ -81,8 +82,11 @@ class Plugin extends AppPlugin {
     injectTableStyles() {
         this.ui.injectCSS(`
             /* 1. Interface Management */
-            .listitem-block.has-table-render:not(.editing) > *:not(.thymer-table-wrapper) { display: none !important; }
-            .listitem-block.has-table-render.editing .thymer-table-wrapper { display: none !important; }
+            .listitem.has-table-render:not(.editing),
+            .listitem-block.has-table-render:not(.editing) { display: none !important; }
+            .listitem.has-table-render.editing,
+            .listitem-block.has-table-render.editing { display: block !important; }
+            .thymer-table-wrapper.thymer-editing { display: none !important; }
             
             /* 2. Wrapper Layout */
             .thymer-table-wrapper { 
@@ -156,34 +160,33 @@ class Plugin extends AppPlugin {
 
     startTableObserver() {
         this.clickHandler = (e) => {
-            const block = e.target.closest('.listitem-block.has-table-render');
-            if (block && !block.classList.contains('editing')) {
-                this.editTable(block);
+            const wrapper = e.target.closest('.thymer-table-wrapper');
+            if (wrapper && !wrapper.classList.contains('thymer-editing')) {
+                this.editTable(wrapper);
                 e.preventDefault();
                 e.stopPropagation();
+                return;
             }
+
+            document.querySelectorAll('.thymer-table-wrapper.thymer-editing').forEach(w => {
+                const items = this.getGroupItems(w);
+                if (items.length > 0 && !items.some(item => item.contains(e.target))) this.finishEditing(w);
+            });
         };
         document.addEventListener('click', this.clickHandler, true);
-        this.processExistingCodeBlocks();
-        this.observer = new MutationObserver((mutations) => {
+        this.scheduleScan(100);
+        this.scheduleScan(500);
+        this.scheduleScan(1500);
+        this.observer = new MutationObserver(() => {
             if (this.isUpdating) return;
-            mutations.forEach(m => m.addedNodes.forEach(node => {
-                if (node.nodeType === Node.ELEMENT_NODE) this.processNode(node);
-            }));
+            this.scheduleScan(100);
         });
-        this.observer.observe(document.body, { childList: true, subtree: true });
+        this.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     }
     
-    editTable(block) {
-        block.classList.add('editing');
-        const handleOutsideClick = (e) => {
-            if (!block.contains(e.target)) {
-                this.updateCodeBlock(block);
-                block.classList.remove('editing');
-                document.removeEventListener('click', handleOutsideClick, true);
-            }
-        };
-        setTimeout(() => document.addEventListener('click', handleOutsideClick, true), 100);
+    editTable(wrapper) {
+        wrapper.classList.add('thymer-editing');
+        this.getGroupItems(wrapper).forEach(item => item.classList.add('editing'));
     }
 
     measureVisualIndentation(block) {
@@ -201,48 +204,221 @@ class Plugin extends AppPlugin {
         return offset;
     }
     
-    updateCodeBlock(block) {
+    scheduleScan(ms) {
+        if (this.scanTimer) clearTimeout(this.scanTimer);
+        this.scanTimer = setTimeout(() => this.scanItemGroups(), ms);
+    }
+
+    scanItemGroups() {
         if (this.isUpdating) return;
         this.isUpdating = true;
         try {
-            const indentation = this.measureVisualIndentation(block);
-            const text = this.extractCodeBlockText(block);
-            const hasTableSyntax = text && text.includes('|') && text.split('\n').filter(l => l.includes('|')).length >= 2;
-            if (!hasTableSyntax) {
-                const wrapper = block.querySelector('.thymer-table-wrapper');
-                if (wrapper) wrapper.remove();
-                block.classList.remove('has-table-render');
-                return;
+            this.cleanupInvalidRenderedTables();
+            const all = document.querySelectorAll('.listitem');
+            const processed = new WeakSet();
+            for (const item of all) {
+                if (processed.has(item) || item.dataset.tgProcessed) continue;
+                if (!this.isTableLine(item)) continue;
+
+                const group = this.collectTableGroup(item);
+                group.forEach(el => processed.add(el));
+                if (group.length < 2) continue;
+
+                const tableText = this.getRenderableTableText(group.map(el => this.extractItemText(el)).join('\n'));
+                const tableHTML = this.parseTable(tableText);
+                if (!tableHTML) continue;
+
+                const wrapper = this.buildWrapper(tableHTML);
+                const groupId = 'tg-' + String(Date.now()) + '-' + Math.random().toString(36).slice(2, 6);
+                wrapper.dataset.tgGroupId = groupId;
+                group.forEach(el => {
+                    el.dataset.tgGroupId = groupId;
+                    el.dataset.tgProcessed = '1';
+                    el.classList.add('has-table-render');
+                });
+                group[group.length - 1].after(wrapper);
             }
-            const tableHTML = this.parseTable(text);
-            if (!tableHTML) return;
-            let wrapper = block.querySelector('.thymer-table-wrapper');
-            if (!wrapper) {
-                wrapper = document.createElement('div');
-                wrapper.className = 'thymer-table-wrapper';
-                wrapper.innerHTML = `<div class="thymer-table-container"></div><div class="thymer-table-edit-hint">Click to edit</div>`;
-                block.appendChild(wrapper);
-                block.classList.add('has-table-render');
-            }
-            if (indentation > 0) {
-                wrapper.style.marginLeft = `${indentation}px`;
-                wrapper.style.width = `calc(100% - ${indentation}px)`;
-            }
-            const container = wrapper.querySelector('.thymer-table-container');
-            if (container) container.innerHTML = tableHTML;
-            this.applyThemeToTable(wrapper);
         } finally { this.isUpdating = false; }
     }
 
-    processExistingCodeBlocks() { document.querySelectorAll('.listitem-block, .block-code').forEach(b => this.updateCodeBlock(b)); }
-    processNode(node) {
-        if (node.classList && (node.classList.contains('listitem-block') || node.classList.contains('block-code'))) this.updateCodeBlock(node);
-        node.querySelectorAll?.('.listitem-block, .block-code').forEach(b => this.updateCodeBlock(b));
+    shouldProcessBlock(block) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) return false;
+        return !this.isCodeContext(block);
     }
-    extractCodeBlockText(block) {
-        const textItems = block.querySelectorAll('.listitem-text, .listitem');
-        if (textItems.length > 0) return Array.from(textItems).map(i => i.textContent?.trim()).join('\n');
-        return block.querySelector('code')?.textContent || block.textContent;
+
+    isCodeContext(el) {
+        const codeSelector = '.block-code, .code-block, pre, code, .cm-editor, .cm-content, .cm-line';
+        if (el.closest(codeSelector) || el.querySelector(codeSelector)) return true;
+
+        const hasCodeClass = (node) => {
+            const className = typeof node.className === 'string' ? node.className : '';
+            return /(^|\s)(block-code|code-block|cm-\S+|\S*code\S*)(\s|$)/i.test(className);
+        };
+
+        let node = el;
+        while (node && node !== document.body) {
+            if (hasCodeClass(node)) return true;
+            node = node.parentElement;
+        }
+
+        return Array.from(el.querySelectorAll('*')).some(hasCodeClass);
+    }
+
+    cleanupInvalidRenderedTables() {
+        document.querySelectorAll('.thymer-table-wrapper').forEach(wrapper => {
+            const items = this.getGroupItems(wrapper);
+            if (!items.length) return;
+            if (items.some(item => !this.shouldProcessBlock(item) || this.isInsideSiblingFence(item))) {
+                items.forEach(item => {
+                    delete item.dataset.tgGroupId;
+                    delete item.dataset.tgProcessed;
+                    item.classList.remove('has-table-render', 'editing');
+                });
+                wrapper.remove();
+            }
+        });
+    }
+
+    isTableLine(item) {
+        if (!this.shouldProcessBlock(item) || this.isInsideSiblingFence(item)) return false;
+        const text = this.extractItemText(item).trim();
+        return text.includes('|') && this.parseRow(text).length >= 2;
+    }
+
+    isFenceLine(text) {
+        return /^\s{0,3}(```+|~~~+)/.test(text || '');
+    }
+
+    isInsideSiblingFence(item) {
+        let inFence = false;
+        let node = item.parentElement?.firstElementChild;
+        while (node && node !== item) {
+            if (node.matches?.('.listitem')) {
+                const text = this.extractItemText(node).trim();
+                if (this.isFenceLine(text)) inFence = !inFence;
+            }
+            node = node.nextElementSibling;
+        }
+        return inFence;
+    }
+
+    collectTableGroup(start) {
+        const group = [start];
+        let prev = start.previousElementSibling;
+        while (prev && prev.matches('.listitem') && !prev.dataset.tgProcessed && this.isTableLine(prev)) {
+            group.unshift(prev);
+            prev = prev.previousElementSibling;
+        }
+        let next = start.nextElementSibling;
+        while (next && next.matches('.listitem') && !next.dataset.tgProcessed && this.isTableLine(next)) {
+            group.push(next);
+            next = next.nextElementSibling;
+        }
+        return group;
+    }
+
+    buildWrapper(tableHTML) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'thymer-table-wrapper';
+        wrapper.innerHTML = `<div class="thymer-table-container">${tableHTML}</div><div class="thymer-table-edit-hint">Click to edit</div>`;
+        this.applyThemeToTable(wrapper);
+        return wrapper;
+    }
+
+    getGroupItems(wrapper) {
+        const groupId = wrapper.dataset.tgGroupId;
+        if (!groupId) return [];
+        const items = [];
+        let el = wrapper.previousElementSibling;
+        while (el && el.dataset?.tgGroupId === groupId) {
+            items.unshift(el);
+            el = el.previousElementSibling;
+        }
+        return items;
+    }
+
+    finishEditing(wrapper) {
+        const items = this.getGroupItems(wrapper);
+        const tableText = this.getRenderableTableText(items.map(el => this.extractItemText(el)).join('\n'));
+        const tableHTML = this.parseTable(tableText);
+        if (items.length >= 2 && tableHTML) {
+            const container = wrapper.querySelector('.thymer-table-container');
+            if (container) container.innerHTML = tableHTML;
+            this.applyThemeToTable(wrapper);
+            items.forEach(el => el.classList.remove('editing'));
+            wrapper.classList.remove('thymer-editing');
+            return;
+        }
+        items.forEach(el => {
+            delete el.dataset.tgGroupId;
+            delete el.dataset.tgProcessed;
+            el.classList.remove('has-table-render', 'editing');
+        });
+        wrapper.remove();
+    }
+
+    extractItemText(item) {
+        const inner = item.querySelector('.listitem-text') || item;
+        return this.stripInlineCode(this.getTextExcludingCode(inner)).trim();
+    }
+
+    extractRenderableText(block) {
+        return this.extractItemText(block);
+    }
+
+    getTextExcludingCode(root) {
+        const ignoredSelector = '.thymer-table-wrapper, pre, code, .inline-code, .cm-inline-code, .cm-code, .cm-formatting-code';
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => {
+                const parent = node.parentElement;
+                if (!parent || parent.closest(ignoredSelector)) return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+        let text = '';
+        let node;
+        while ((node = walker.nextNode())) text += node.textContent;
+        return text;
+    }
+
+    stripInlineCode(text) {
+        if (!text) return '';
+        let result = '';
+        for (let i = 0; i < text.length;) {
+            if (text[i] !== '`') {
+                result += text[i++];
+                continue;
+            }
+            let tickCount = 1;
+            while (text[i + tickCount] === '`') tickCount++;
+            const marker = '`'.repeat(tickCount);
+            const end = text.indexOf(marker, i + tickCount);
+            if (end === -1) {
+                result += marker;
+                i += tickCount;
+            } else {
+                i = end + tickCount;
+            }
+        }
+        return result;
+    }
+
+    getRenderableTableText(content) {
+        if (!content) return '';
+        const lines = content.split('\n');
+        const kept = [];
+        let inFence = false;
+        let fenceMarker = null;
+        for (const line of lines) {
+            const match = line.match(/^\s{0,3}(```+|~~~+)/);
+            if (match && (!inFence || match[1][0] === fenceMarker)) {
+                inFence = !inFence;
+                fenceMarker = inFence ? match[1][0] : null;
+                continue;
+            }
+            if (!inFence) kept.push(line);
+        }
+        return kept.join('\n');
     }
 
     parseTable(content) {
