@@ -1,6 +1,6 @@
 {
 	"ver": 1.1,
-	"name": "Janky Tables",
+	"name": "Thyme(r)s Tables",
 	"icon": "ti-table",
 	"item_name": "Note",
 	"description": "Render tables in HTML",
