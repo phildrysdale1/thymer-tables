@@ -13,8 +13,8 @@
  * 4. Click table → edit mode
  * 5. Click outside → re-renders
  *
- * @author phild & Niklas (with help from Claude & Gemini)
- * @version 1.1.2
+ * @author phild & Niklas (with help from Claude & Gemini
+ * @version 1.1.3
  * @license GPL3
  */
 class Plugin extends AppPlugin {
@@ -24,6 +24,7 @@ class Plugin extends AppPlugin {
         this.selectionRevealWrappers = new Set();
         this.arrowRevealStates = new Map();
         this.enterExitStates = new Map();
+        this.tableGroups = new Map();
         this.injectTableStyles();
         this.startSelectAllHandler();
         this.startArrowNavigationHandler();
@@ -41,6 +42,8 @@ class Plugin extends AppPlugin {
         if (this.restoreSelectionRevealTimer)
             clearTimeout(this.restoreSelectionRevealTimer);
         if (this.scanTimer) clearTimeout(this.scanTimer);
+        if (this.scanIdle && window.cancelIdleCallback)
+            window.cancelIdleCallback(this.scanIdle);
     }
 
     /**
@@ -533,9 +536,10 @@ class Plugin extends AppPlugin {
         this.scheduleScan(100);
         this.scheduleScan(500);
         this.scheduleScan(1500);
-        this.observer = new MutationObserver(() => {
+        this.observer = new MutationObserver((mutations) => {
             if (this.isUpdating) return;
-            this.scheduleScan(100);
+            if (!this.mutationsMayAffectTables(mutations)) return;
+            this.scheduleScan(250);
         });
         this.observer.observe(document.body, {
             childList: true,
@@ -571,7 +575,25 @@ class Plugin extends AppPlugin {
 
     scheduleScan(ms) {
         if (this.scanTimer) clearTimeout(this.scanTimer);
-        this.scanTimer = setTimeout(() => this.scanItemGroups(), ms);
+        if (this.scanIdle && window.cancelIdleCallback) {
+            window.cancelIdleCallback(this.scanIdle);
+            this.scanIdle = null;
+        }
+
+        this.scanTimer = setTimeout(() => {
+            this.scanTimer = null;
+            if (window.requestIdleCallback) {
+                this.scanIdle = window.requestIdleCallback(
+                    () => {
+                        this.scanIdle = null;
+                        this.scanItemGroups();
+                    },
+                    { timeout: 1500 },
+                );
+            } else {
+                this.scanItemGroups();
+            }
+        }, ms);
     }
 
     scanItemGroups() {
@@ -607,11 +629,34 @@ class Plugin extends AppPlugin {
                     el.dataset.tgProcessed = "1";
                     el.classList.add("has-table-render");
                 });
+                this.tableGroups.set(groupId, group);
                 group[group.length - 1].after(wrapper);
             }
         } finally {
             this.isUpdating = false;
         }
+    }
+
+    mutationsMayAffectTables(mutations) {
+        return mutations.some((mutation) => {
+            if (this.nodeMayAffectTables(mutation.target)) return true;
+            return Array.from(mutation.addedNodes)
+                .concat(Array.from(mutation.removedNodes))
+                .some((node) => this.nodeMayAffectTables(node));
+        });
+    }
+
+    nodeMayAffectTables(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+            const parent = node?.parentElement;
+            return !!parent?.closest?.(".listitem");
+        }
+
+        return !!(
+            node.matches?.(".listitem, .thymer-table-wrapper") ||
+            node.querySelector?.(".listitem, .thymer-table-wrapper") ||
+            node.closest?.(".listitem, .thymer-table-wrapper")
+        );
     }
 
     shouldProcessBlock(block) {
@@ -660,6 +705,7 @@ class Plugin extends AppPlugin {
                         delete item.dataset.tgProcessed;
                         item.classList.remove("has-table-render", "editing");
                     });
+                    this.tableGroups.delete(wrapper.dataset.tgGroupId);
                     wrapper.remove();
                 }
             });
@@ -726,13 +772,28 @@ class Plugin extends AppPlugin {
         const groupId = wrapper.dataset.tgGroupId;
         if (!groupId) return [];
 
-        // Prefer the tracked group id over sibling walking. Pressing Enter to
-        // leave a table can insert a blank list item between the table source
-        // rows and the rendered wrapper; sibling-only lookup then loses the
-        // table rows and cannot re-render.
-        return Array.from(document.querySelectorAll(".listitem")).filter(
-            (el) => el.dataset?.tgGroupId === groupId,
+        // Fast path: use the group captured when the wrapper was built. The
+        // previous implementation scanned every .listitem for every table,
+        // which made pages with several tables very slow during Thymer's
+        // scroll/virtualization updates.
+        const cached = this.tableGroups?.get(groupId);
+        if (cached?.length && cached.every((el) => el.isConnected)) {
+            return cached;
+        }
+
+        // Fallback for DOM changes such as Enter inserting an item between the
+        // source rows and wrapper. Query only matching rows, not all listitems.
+        const items = Array.from(
+            document.querySelectorAll(
+                `.listitem[data-tg-group-id="${this.escapeAttributeValue(groupId)}"]`,
+            ),
         );
+        if (items.length) this.tableGroups?.set(groupId, items);
+        return items;
+    }
+
+    escapeAttributeValue(value) {
+        return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     }
 
     finishEditing(wrapper) {
@@ -756,6 +817,7 @@ class Plugin extends AppPlugin {
             delete el.dataset.tgProcessed;
             el.classList.remove("has-table-render", "editing");
         });
+        this.tableGroups?.delete(wrapper.dataset.tgGroupId);
         wrapper.remove();
     }
 
